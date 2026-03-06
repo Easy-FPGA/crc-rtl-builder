@@ -419,6 +419,19 @@
         }
         .rtl-copy-btn:hover { background: #2ea043; }
 
+        .rtl-dl-btn {
+            background: #1f3a5f;
+            border: 1px solid #2d5a8e;
+            color: #58a6ff;
+            padding: 4px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            transition: all 0.2s;
+            margin: 4px 0 4px 4px;
+        }
+        .rtl-dl-btn:hover { background: #2d5a8e; }
+
         .code-panel {
             background: #0d1117;
             color: #e6edf3;
@@ -580,6 +593,7 @@
                 <button class="code-tab" id="tab-tb"  onclick="showOutputTab('tb')">🧪 Testbench (.sv)</button>
                 <div class="code-tab-spacer"></div>
                 <button class="rtl-copy-btn" onclick="copyActiveTab()">📋 Copy</button>
+                <button class="rtl-dl-btn" onclick="downloadActiveTab()">⬇ Download</button>
             </div>
             <pre class="code-panel active" id="rtlCode"></pre>
             <pre class="code-panel" id="tbCode"></pre>
@@ -627,6 +641,18 @@
                 <div class="info-use">✅ I2C, SMBus, sensors</div>
             </div>
         </div>
+    </div>
+
+    <!-- Self-Test -->
+    <div class="card" id="selfTestCard">
+        <h2>🧪 Self-Test  <span id="selfTestBadge" style="font-size:0.8rem; font-weight:normal; margin-left:8px;"></span></h2>
+        <p style="font-size:0.82rem; color:#8b949e; margin-bottom:12px;">
+            Verifies the Calculator and RTL evaluator agree on all standard presets using the
+            IEEE test vector <code style="color:#3fb950;">"123456789"</code>.
+            Runs automatically on page load.
+        </p>
+        <div id="selfTestTable"></div>
+        <button class="gen-main-btn" style="margin-top:12px;" onclick="runSelfTest()">▶ Re-run Self-Test</button>
     </div>
 
     <!-- CTA -->
@@ -709,16 +735,16 @@ function setInputMode(mode) {
     event.target.classList.add('active');
 
     const hints = {
-        hex:   'HEX input: separate with spaces or commas (e.g. 31 32 33 or 0x31,0x32)',
+        hex:   'HEX: tokens read left→right (big-endian). 1-2 digits=1 byte, 3-4=2 bytes, 5-6=3 bytes, 7-8=4 bytes. Tokens >8 digits split into 8-digit chunks.',
         ascii: 'ASCII input: type text directly (e.g. 123456789)',
-        bin:   'Binary input: 8-bit groups (e.g. 00110001 00110010)'
+        bin:   'Binary input: 8-bit groups (e.g. 00110001 00110010)',
     };
 
     document.getElementById('inputHint').textContent = hints[mode];
     document.getElementById('dataInput').placeholder = {
-        hex: '31 32 33 34 35 36 37 38 39',
+        hex:   '31 32 33  or  78563412  (= bytes 78,56,34,12 in order)',
         ascii: '123456789',
-        bin: '00110001 00110010 00110011'
+        bin:   '00110001 00110010 00110011',
     }[mode];
 }
 
@@ -746,13 +772,39 @@ function parseInput(raw, mode) {
         });
     }
 
-    // HEX mode
+    // WORD (32-bit) mode — LSB-first byte expansion (matches RTL: data_in[7:0] = first byte)
+    if (mode === 'word') {
+        const cleaned = raw.replace(/0x/gi, '').replace(/[,\s]+/g, ' ').trim();
+        const parts = cleaned.split(' ').filter(s => s.length > 0);
+        const bytes = [];
+        for (const w of parts) {
+            if (!/^[0-9a-fA-F]{1,8}$/.test(w)) throw new Error(`Invalid WORD value: ${w}`);
+            const val = parseInt(w, 16) >>> 0;
+            bytes.push((val       ) & 0xFF);
+            bytes.push((val >>>  8) & 0xFF);
+            bytes.push((val >>> 16) & 0xFF);
+            bytes.push((val >>> 24) & 0xFF);
+        }
+        return bytes;
+    }
+
+    // HEX mode — big-endian (sequential) byte order.
+    // Each token is read left→right: '78563412' → [0x78, 0x56, 0x34, 0x12]
+    // Tokens > 8 hex digits are split into 8-digit chunks (left→right), each big-endian.
     const cleaned = raw.replace(/0x/gi, '').replace(/[,\s]+/g, ' ').trim();
     const parts = cleaned.split(' ').filter(s => s.length > 0);
-    return parts.map(h => {
-        if (!/^[0-9a-fA-F]{1,2}$/.test(h)) throw new Error(`Invalid HEX value: ${h}`);
-        return parseInt(h, 16);
-    });
+    const bytes = [];
+    for (const h of parts) {
+        if (!/^[0-9a-fA-F]+$/.test(h)) throw new Error(`Invalid HEX value: ${h}`);
+        const chunks = h.match(/.{1,8}/g);  // split into ≤8-digit chunks
+        for (const chunk of chunks) {
+            const val = parseInt(chunk, 16) >>> 0;
+            const byteCount = Math.ceil(chunk.length / 2);
+            for (let b = byteCount - 1; b >= 0; b--)  // MSB-first: left byte first
+                bytes.push((val >> (b * 8)) & 0xFF);
+        }
+    }
+    return bytes;
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -788,7 +840,7 @@ function calcCRC(data, width, poly, init, xorOut, refIn, refOut) {
     }
 
     if (refOut) crc = reflect(crc, width);
-    return (crc ^ xorOut) & mask;
+    return ((crc ^ xorOut) & mask) >>> 0;  // force unsigned
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -864,6 +916,7 @@ window.onload = function() {
     document.getElementById('dataInput').value = '31 32 33 34 35 36 37 38 39';
     updateModuleName();
     calculate();
+    runSelfTest();
 };
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -910,8 +963,9 @@ function computeCRCMatrix(crcWidth, poly, dataWidth, refIn) {
     return { A, B };
 }
 
-// Evaluate module output for given crc_in and data_in values
-function evalModule(crcInVal, dataVal, A, B, crcWidth, dataWidth, refOut) {
+// Evaluate module: returns INTERNAL next state (no refOut applied)
+// refOut must be applied separately only for final output
+function evalModule(crcInVal, dataVal, A, B, crcWidth, dataWidth) {
     crcInVal = BigInt(crcInVal);
     dataVal  = BigInt(dataVal);
     let result = 0n;
@@ -921,10 +975,17 @@ function evalModule(crcInVal, dataVal, A, B, crcWidth, dataWidth, refOut) {
             if ((A[j] >> BigInt(i)) & 1n) bit ^= (crcInVal >> BigInt(j)) & 1n;
         for (let k = 0; k < dataWidth; k++)
             if ((B[k] >> BigInt(i)) & 1n) bit ^= (dataVal >> BigInt(k)) & 1n;
-        const outIdx = refOut ? (crcWidth - 1 - i) : i;
-        result |= (bit & 1n) << BigInt(outIdx);
+        result |= (bit & 1n) << BigInt(i);  // always bit i — no refOut
     }
     return result;
+}
+
+// Apply refOut reflection to a BigInt CRC state
+function applyRefOut(val, crcWidth) {
+    let reflected = 0n;
+    for (let i = 0; i < crcWidth; i++)
+        if ((val >> BigInt(i)) & 1n) reflected |= 1n << BigInt(crcWidth - 1 - i);
+    return reflected;
 }
 
 // Get current RTL parameters from UI
@@ -948,6 +1009,21 @@ function getRTLParams() {
     const algName = algNames[currentPreset] || 'Custom CRC';
     const { A, B } = computeCRCMatrix(crcWidth, poly, dataWidth, refIn);
     return { crcWidth, poly, init, xorOut, refIn, refOut, dataWidth, moduleName, algName, A, B };
+}
+
+function downloadActiveTab() {
+    const activePanel = document.querySelector('.code-panel.active');
+    if (!activePanel) return;
+    const isRTL = document.getElementById('tab-rtl').classList.contains('active');
+    const moduleName = (document.getElementById('moduleName').value.trim()) || 'crc_module';
+    const filename = isRTL ? `${moduleName}.sv` : `${moduleName}_tb.sv`;
+    const blob = new Blob([activePanel.textContent], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    showToast(`Downloaded: ${filename}`);
 }
 
 function generateAll() {
@@ -978,9 +1054,10 @@ function copyActiveTab() {
 
 // ── RTL builder ──────────────────────────────────────────────────
 function buildRTL({ crcWidth, poly, init, xorOut, refIn, refOut, dataWidth, moduleName, algName, A, B }) {
-    const ph  = (v, w) => v.toString(16).toUpperCase().padStart(Math.ceil(w / 4), '0');
+    const ph  = (v, w) => (v >>> 0).toString(16).toUpperCase().padStart(Math.ceil(w / 4), '0');
     const sep = '// ' + '='.repeat(59);
     const L   = [];
+    const hasXor = xorOut !== 0;
 
     L.push('// Generated by CRC RTL Builder  (easyfpga.blog)');
     L.push(sep);
@@ -992,34 +1069,62 @@ function buildRTL({ crcWidth, poly, init, xorOut, refIn, refOut, dataWidth, modu
     L.push(`// XOR Out    : 0x${ph(xorOut, crcWidth)}`);
     L.push(`// RefIn      : ${refIn}  |  RefOut : ${refOut}`);
     L.push(sep);
-    L.push('// Usage:');
-    L.push(`//   Reset  : crc_reg <= ${crcWidth}'h${ph(init, crcWidth)};`);
-    L.push('//   Per-clk: crc_reg <= crc_out;');
-    if (xorOut !== 0)
-        L.push(`//   Final  : result = crc_reg ^ ${crcWidth}'h${ph(xorOut, crcWidth)};`);
+    L.push('// Port description:');
+    L.push('//   clk      : Clock (posedge)');
+    L.push('//   resetn   : Active-low synchronous reset');
+    L.push('//   data_in  : Input data word');
+    L.push('//   crc_out  : Registered CRC state (next clock after data_in)');
+    if (hasXor)
+        L.push('//   crc_final: Final CRC = crc_out ^ XOR_OUT  (matches Calculator output)');
     L.push(sep);
     L.push('');
     L.push(`module ${moduleName} (`);
+    L.push(`    input  logic        clk,`);
+    L.push(`    input  logic        resetn,`);
     L.push(`    input  logic [${dataWidth - 1}:0] data_in,`);
-    L.push(`    input  logic [${crcWidth - 1}:0] crc_in,`);
-    L.push(`    output logic [${crcWidth - 1}:0] crc_out`);
+    if (hasXor) {
+        L.push(`    output logic [${crcWidth - 1}:0] crc_out,`);
+        L.push(`    output logic [${crcWidth - 1}:0] crc_final`);
+    } else {
+        L.push(`    output logic [${crcWidth - 1}:0] crc_out`);
+    }
     L.push(');');
     L.push('');
+    L.push(`    logic [${crcWidth - 1}:0] crc_reg;`);
+    L.push(`    logic [${crcWidth - 1}:0] crc_next;`);
+    L.push('');
+    L.push('    // ── CRC combinational logic ──────────────────────────');
     L.push('    always_comb begin');
 
     for (let i = 0; i < crcWidth; i++) {
-        const outIdx = refOut ? (crcWidth - 1 - i) : i;
         const terms  = [];
         for (let j = 0; j < crcWidth; j++)
-            if ((A[j] >> BigInt(i)) & 1n) terms.push(`crc_in[${j}]`);
+            if ((A[j] >> BigInt(i)) & 1n) terms.push(`crc_reg[${j}]`);
         for (let k = 0; k < dataWidth; k++)
             if ((B[k] >> BigInt(i)) & 1n) terms.push(`data_in[${k}]`);
         L.push(terms.length === 0
-            ? `        crc_out[${outIdx}] = 1'b0;`
-            : `        crc_out[${outIdx}] = ${terms.join(' ^ ')};`);
+            ? `        crc_next[${i}] = 1'b0;`
+            : `        crc_next[${i}] = ${terms.join(' ^ ')};`);
     }
 
     L.push('    end');
+    L.push('');
+    L.push('    // ── CRC register ─────────────────────────────────────');
+    L.push('    always_ff @(posedge clk) begin');
+    L.push(`        if (!resetn) crc_reg <= ${crcWidth}'h${ph(init, crcWidth)};`);
+    L.push('        else         crc_reg <= crc_next;');
+    L.push('    end');
+    L.push('');
+    if (refOut) {
+        L.push('    // RefOut: reflect crc_reg for output');
+        for (let i = 0; i < crcWidth; i++)
+            L.push(`    assign crc_out[${crcWidth - 1 - i}] = crc_reg[${i}];`);
+    } else {
+        L.push('    assign crc_out = crc_reg;');
+    }
+    if (hasXor) {
+        L.push(`    assign crc_final = crc_out ^ ${crcWidth}'h${ph(xorOut, crcWidth)};`);
+    }
     L.push('');
     L.push('endmodule');
     return L.join('\n');
@@ -1027,32 +1132,40 @@ function buildRTL({ crcWidth, poly, init, xorOut, refIn, refOut, dataWidth, modu
 
 // ── Testbench builder ────────────────────────────────────────────
 function buildTestbench({ crcWidth, poly, init, xorOut, refIn, refOut, dataWidth, moduleName, algName, A, B }) {
-    const ph  = (v, w) => v.toString(16).toUpperCase().padStart(Math.ceil(w / 4), '0');
+    const ph  = (v, w) => {
+        const hex = typeof v === 'bigint' ? v.toString(16) : (v >>> 0).toString(16);
+        return hex.toUpperCase().padStart(Math.ceil(w / 4), '0');
+    };
     const sep = '// ' + '='.repeat(59);
-    const dMask = dataWidth <= 32 ? (dataWidth === 32 ? 0xFFFFFFFF : (1 << dataWidth) - 1) : -1;
+    const dataMask = (1n << BigInt(dataWidth)) - 1n;
     const L = [];
 
-    // Build 4 deterministic test data words
-    const testWords = [
-        dataWidth <= 32 ? 0xA5A5A5A5 & dMask : 0xA5A5A5A5A5A5A5A5n,
-        dataWidth <= 32 ? 0x12345678 & dMask : 0x123456789ABCDEF0n,
-        dataWidth <= 32 ? 0xDEADBEEF & dMask : 0xDEADBEEFCAFEBABEn,
-        dataWidth <= 32 ? 0x00FF00FF & dMask : 0x00FF00FF00FF00FFn,
+    // Build 4 deterministic test data words (BigInt)
+    const testWords = dataWidth <= 32 ? [
+        BigInt(0xA5A5A5A5 >>> 0) & dataMask,
+        BigInt(0x12345678 >>> 0) & dataMask,
+        BigInt(0xDEADBEEF >>> 0) & dataMask,
+        BigInt(0x00FF00FF >>> 0) & dataMask,
+    ] : [
+        0xA5A5A5A5A5A5A5A5n & dataMask,
+        0x123456789ABCDEF0n & dataMask,
+        0xDEADBEEFCAFEBABEn & dataMask,
+        0x00FF00FF00FF00FFn & dataMask,
     ];
-    if (dataWidth < 32) testWords.forEach((v,i) => testWords[i] = v & dMask);
 
-    // Compute chained CRC:
-    // state starts at init (no refOut applied to init)
+    // Compute chained internal states (no refOut during chaining)
     let state = BigInt(init);
     const states = [state];
     for (const w of testWords) {
-        state = evalModule(state, BigInt(w), A, B, crcWidth, dataWidth, refOut);
+        state = evalModule(state, w, A, B, crcWidth, dataWidth);
         states.push(state);
     }
-    const finalCRC = (state ^ BigInt(xorOut)) & ((1n << BigInt(crcWidth)) - 1n);
-
-    const hexW = Math.ceil(dataWidth / 4);
-    const hexC = Math.ceil(crcWidth  / 4);
+    const crcMask = (1n << BigInt(crcWidth)) - 1n;
+    function toFinal(s) {
+        let v = refOut ? applyRefOut(s, crcWidth) : s;
+        return (v ^ BigInt(xorOut)) & crcMask;
+    }
+    const finalCRC = toFinal(state);
 
     L.push('// Generated by CRC RTL Builder  (easyfpga.blog)');
     L.push('// Self-checking testbench — run with Vivado xsim or Icarus Verilog');
@@ -1064,13 +1177,17 @@ function buildTestbench({ crcWidth, poly, init, xorOut, refIn, refOut, dataWidth
     L.push('`timescale 1ns/1ps');
     L.push(`module ${moduleName}_tb;`);
     L.push('');
-    L.push(`    logic [${dataWidth-1}:0] data_in;`);
-    L.push(`    logic [${crcWidth-1}:0] crc_in;`);
+    L.push('    logic        clk    = 0;');
+    L.push('    logic        resetn = 0;');
+    L.push(`    logic [${dataWidth-1}:0] data_in = '0;`);
     L.push(`    logic [${crcWidth-1}:0] crc_out;`);
+    if (xorOut !== 0)
+        L.push(`    logic [${crcWidth-1}:0] crc_final;`);
     L.push('');
-    L.push(`    ${moduleName} dut (.*);
-`);
-    L.push(`    logic [${crcWidth-1}:0] crc_reg;`);
+    L.push(`    ${moduleName} dut (.*);`);
+    L.push('');
+    L.push('    always #5 clk = ~clk;   // 100 MHz');
+    L.push('');
     L.push(`    logic [${crcWidth-1}:0] result;`);
     L.push('    integer pass_cnt = 0, fail_cnt = 0;');
     L.push('');
@@ -1092,20 +1209,25 @@ function buildTestbench({ crcWidth, poly, init, xorOut, refIn, refOut, dataWidth
     L.push(`        $display("Algorithm : ${algName}");`);
     L.push(`        $display("${sep.slice(3)}");`);
     L.push('');
-    L.push(`        // ── Test 1: single word ──────────────────────────`);
-    L.push(`        crc_in  = ${crcWidth}'h${ph(init, crcWidth)};  // init`);
-    L.push(`        data_in = ${dataWidth}'h${ph(Number(testWords[0]) || testWords[0], dataWidth)};`);
-    L.push('        #1;');
-    L.push(`        result  = crc_out ^ ${crcWidth}'h${ph(xorOut, crcWidth)};`);
-    L.push(`        chk(${crcWidth}'h${ph(Number((states[1] ^ BigInt(xorOut)) & ((1n << BigInt(crcWidth)) - 1n)) || (states[1] ^ BigInt(xorOut)) & ((1n << BigInt(crcWidth)) - 1n), crcWidth)}, "Single word");`);
+    L.push('        // ── Reset ────────────────────────────────────────');
+    L.push('        resetn = 0;');
+    L.push('        @(posedge clk); #1;');
+    L.push('        @(posedge clk); #1;');
+    L.push('        resetn = 1;');
     L.push('');
-    L.push(`        // ── Test 2: 4-word chain ─────────────────────────`);
-    L.push(`        crc_reg = ${crcWidth}'h${ph(init, crcWidth)};  // reset`);
+    L.push('        // ── Test 1: single word ──────────────────────────');
+    L.push(`        data_in = ${dataWidth}'h${ph(testWords[0], dataWidth)};`);
+    L.push('        @(posedge clk); #1;');
+    const singleResult = toFinal(states[1]);
+    L.push(`        result = ${xorOut !== 0 ? 'crc_final' : 'crc_out'};`);
+    L.push(`        chk(${crcWidth}'h${ph(singleResult, crcWidth)}, "Single word");`);
+    L.push('');
+    L.push('        // ── Test 2: 4-word chain ─────────────────────────');
+    L.push('        resetn = 0; @(posedge clk); #1; resetn = 1;');
     testWords.forEach((w, i) => {
-        const wv = typeof w === 'bigint' ? w : BigInt(w);
-        L.push(`        data_in = ${dataWidth}'h${ph(wv, dataWidth)}; crc_in = crc_reg; #1; crc_reg = crc_out;  // word ${i+1}`);
+        L.push(`        data_in = ${dataWidth}'h${ph(w, dataWidth)}; @(posedge clk); #1;  // word ${i+1}`);
     });
-    L.push(`        result = crc_reg ^ ${crcWidth}'h${ph(xorOut, crcWidth)};`);
+    L.push(`        result = ${xorOut !== 0 ? 'crc_final' : 'crc_out'};`);
     L.push(`        chk(${crcWidth}'h${ph(finalCRC, crcWidth)}, "4-word chain");`);
     L.push('');
     L.push('        // ── Summary ──────────────────────────────────────');
@@ -1123,6 +1245,86 @@ function buildTestbench({ crcWidth, poly, init, xorOut, refIn, refOut, dataWidth
 // Legacy wrappers (kept for backward compat)
 function generateRTL() { generateAll(); }
 function copyRTL() { copyActiveTab(); }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Self-Test: Calculator vs RTL evaluator  ("123456789" test vector)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+const KNOWN_GOOD = {
+    crc32:       { val: 0xCBF43926, label: 'CRC-32'        },
+    crc32c:      { val: 0xE3069283, label: 'CRC-32C'       },
+    crc16:       { val: 0xBB3D,     label: 'CRC-16/IBM'    },
+    crc16ccitt:  { val: 0x29B1,     label: 'CRC-16/CCITT'  },
+    crc16modbus: { val: 0x4B37,     label: 'CRC-16/MODBUS' },
+    crc8:        { val: 0xF4,       label: 'CRC-8'         },
+};
+
+function runSelfTest() {
+    const testInput = '123456789';
+    const testBytes = Array.from(testInput).map(c => c.charCodeAt(0));
+    const rows = [];
+    let allPass = true;
+
+    for (const [name, kg] of Object.entries(KNOWN_GOOD)) {
+        const p       = PRESETS[name];
+        const polyN   = parseInt(p.poly,   16) >>> 0;
+        const initN   = parseInt(p.init,   16) >>> 0;
+        const xorOutN = parseInt(p.xorOut, 16) >>> 0;
+
+        // ① Calculator result
+        const calcResult = calcCRC(testBytes, p.width, polyN, initN, xorOutN, p.refIn, p.refOut);
+
+        // ② RTL evaluator: simulate byte-by-byte with 8-bit dataWidth
+        const { A, B } = computeCRCMatrix(p.width, polyN, 8, p.refIn);
+        const crcMask = (1n << BigInt(p.width)) - 1n;
+        let state = BigInt(initN) & crcMask;
+        for (const byte of testBytes)
+            state = evalModule(state, byte, A, B, p.width, 8);
+        let rtlFinal = p.refOut ? applyRefOut(state, p.width) : state;
+        rtlFinal = (rtlFinal ^ BigInt(xorOutN)) & crcMask;
+        const rtlResult = Number(rtlFinal) >>> 0;
+
+        const hexW     = Math.ceil(p.width / 4);
+        const knownOK  = calcResult === (kg.val >>> 0);
+        const rtlMatch = calcResult === rtlResult;
+        const pass     = knownOK && rtlMatch;
+        if (!pass) allPass = false;
+
+        rows.push({ label: kg.label, calcResult, rtlResult, known: kg.val, pass, knownOK, rtlMatch, hexW });
+    }
+
+    const badge = document.getElementById('selfTestBadge');
+    badge.textContent = allPass ? '✅ ALL PASS' : '❌ FAIL';
+    badge.style.color = allPass ? '#3fb950' : '#f85149';
+
+    const h = (v, w) => '0x' + (v >>> 0).toString(16).toUpperCase().padStart(w, '0');
+    let html = `
+        <table style="width:100%;border-collapse:collapse;font-size:0.82rem;font-family:'Courier New',monospace;">
+        <thead><tr style="color:#8b949e;text-align:left;border-bottom:1px solid #30363d;">
+            <th style="padding:6px 8px;">Preset</th>
+            <th style="padding:6px 8px;">Known-Good</th>
+            <th style="padding:6px 8px;">Calculator</th>
+            <th style="padding:6px 8px;">RTL Eval</th>
+            <th style="padding:6px 8px;text-align:center;">Result</th>
+        </tr></thead><tbody>`;
+
+    for (const r of rows) {
+        const rowColor  = r.pass ? '' : 'background:#2d1a1a;';
+        const calcColor = r.knownOK  ? '#3fb950' : '#f85149';
+        const rtlColor  = r.rtlMatch ? '#3fb950' : '#f85149';
+        const badge     = r.pass ? '<span style="color:#3fb950;">✅ PASS</span>'
+                                 : '<span style="color:#f85149;">❌ FAIL</span>';
+        html += `<tr style="border-bottom:1px solid #21262d;${rowColor}">
+            <td style="padding:6px 8px;color:#e6edf3;">${r.label}</td>
+            <td style="padding:6px 8px;color:#8b949e;">${h(r.known, r.hexW)}</td>
+            <td style="padding:6px 8px;color:${calcColor};">${h(r.calcResult, r.hexW)}</td>
+            <td style="padding:6px 8px;color:${rtlColor};">${h(r.rtlResult, r.hexW)}</td>
+            <td style="padding:6px 8px;text-align:center;">${badge}</td>
+        </tr>`;
+    }
+    html += '</tbody></table>';
+    document.getElementById('selfTestTable').innerHTML = html;
+}
 </script>
 </body>
 </html>
